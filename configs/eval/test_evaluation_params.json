@@ -1,0 +1,5 @@
+{
+    "metrics" :["AUC", "Hits@K", "Precision@K", "F1"],
+    "Hits_K": 500,
+    "Precision_K": 500
+}

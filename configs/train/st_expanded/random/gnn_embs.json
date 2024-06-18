@@ -1,0 +1,1 @@
+{"hidden_channels": 64, "learning_rate": 0.0006432593601733, "weight_decay": 0.0262558295109768, "model_name": "gnn", "data_split": "random", "initialization": "embs"}

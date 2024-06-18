@@ -1,0 +1,1 @@
+{"hidden_channels": 256, "learning_rate": 0.0015951229372321, "weight_decay": 0.0264428122397877, "model_name": "gnn", "data_split": "target", "initialization": "cp"}

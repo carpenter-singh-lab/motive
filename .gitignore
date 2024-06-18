@@ -1,0 +1,11 @@
+__pycache__
+inputs/
+.DS_Store
+.snakemake
+data/
+.devenv/
+.direnv/
+.envrc
+.venv/
+run.sh
+test/
