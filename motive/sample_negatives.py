@@ -1,121 +1,85 @@
-import numpy as np
-import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.transforms import BaseTransform
 
-SEED = 2024319
-
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def find_indices(reference, query):
+    """
+    get the indices of the query that are in reference.
+    e.g.
+    reference = torch.tensor([3, 10, 7])
+    query = torch.tensor([7, 3, 3, 7, 10])
+    find_indices(reference, query)
+    >>> tensor([2, 0, 0, 2, 1])
+    """
+    return torch.max(reference[:, None] == query[None, :], axis=0).indices
+
+
+def negative_sampling(source_ix, target_ix, pos_edges, size):
+    """
+    Negative sampling using GPU and batched impl.
+    Create source_ix[i], target_ix[j] pairs that are not present in pos_edges.
+    """
+    size = size * 2
+    neg_source_ix = torch.randperm(size) % len(source_ix)
+    neg_source_ix = source_ix[neg_source_ix]
+    neg_target_ix = torch.randperm(size) % len(target_ix)
+    neg_target_ix = target_ix[neg_target_ix]
+    samples = torch.stack([neg_source_ix, neg_target_ix]).T
+    samples = torch.unique(samples, dim=0)
+
+    y_true = torch.any(torch.all(samples[:, None] == pos_edges.T, axis=2), axis=1)
+    samples = samples[~y_true]
+    samples = samples[: size // 2].T
+    return samples
+
+
+def select_nodes_to_sample(data, split):
+    """Select nodes to build negative samples based on the split"""
+    source_ix = data["binds"].edge_label_index[0]
+    target_ix = data["binds"].edge_label_index[1]
+    if split != "source":
+        source_ix = torch.cat((source_ix, data["binds"].edge_index[0]))
+    if split != "target":
+        target_ix = torch.cat((target_ix, data["binds"].edge_index[1]))
+    return source_ix.unique(), target_ix.unique()
+
+
 class SampleNegatives(BaseTransform):
-    def __init__(self, edges, datasplit, ratio=1):
-        self.edges = edges
-        self.datasplit = datasplit
+    def __init__(self, edges, split, ratio):
+        self.edges = torch.tensor(edges, device=DEVICE)
+        self.split = split
         self.ratio = ratio
 
     def forward(self, data: HeteroData):
+        data = data.to(DEVICE, non_blocking=True)
+
         num_pos = len(data["binds"].edge_label)
+        # Select nodes
+        subgraph_src, subgraph_tgt = select_nodes_to_sample(data, self.split)
 
-        if self.datasplit == "source":
-            subgraph_src = data["binds"].edge_label_index[0].unique()
-            global_src = data["source"].node_id[subgraph_src]
+        # map local (subgraph) edge indices to global indices
+        global_src = data["source"].node_id[subgraph_src]
+        global_tgt = data["target"].node_id[subgraph_tgt]
 
-            subgraph_tgt = torch.cat(
-                (
-                    data["binds"].edge_index[1].unique().cpu(),
-                    data["binds"].edge_label_index[1].unique().cpu(),
-                ),
-                dim=0,
-            ).unique()
-            global_tgt = data["target"].node_id[subgraph_tgt]
+        size = num_pos * self.ratio
+        neg_edges = negative_sampling(global_src, global_tgt, self.edges, size)
 
-        elif self.datasplit == "target":
-            subgraph_src = torch.cat(
-                (
-                    data["binds"].edge_index[0].unique().cpu(),
-                    data["binds"].edge_label_index[0].unique().cpu(),
-                ),
-                dim=0,
-            ).unique()
-            global_src = data["source"].node_id[subgraph_src]
+        # map global edge indices to local (subgraph) indices
+        neg_src = find_indices(data["source"].node_id, neg_edges[0])
+        neg_tgt = find_indices(data["target"].node_id, neg_edges[1])
 
-            subgraph_tgt = data["binds"].edge_label_index[1].unique()
-            global_tgt = data["target"].node_id[subgraph_tgt]
+        # concat current and new edges and labels
+        neg_edges = torch.stack([neg_src, neg_tgt])
+        new_edges = torch.cat((data["binds"].edge_label_index, neg_edges), axis=1)
 
-        elif self.datasplit == "random":
-            subgraph_src = torch.cat(
-                (
-                    data["binds"].edge_index[0].unique().cpu(),
-                    data["binds"].edge_label_index[0].unique().cpu(),
-                ),
-                dim=0,
-            ).unique()
-            global_src = data["source"].node_id[subgraph_src]
+        neg_label = torch.zeros(len(neg_src), device=DEVICE)
+        new_label = torch.cat((data["binds"].edge_label, neg_label))
 
-            subgraph_tgt = torch.cat(
-                (
-                    data["binds"].edge_index[1].unique().cpu(),
-                    data["binds"].edge_label_index[1].unique().cpu(),
-                ),
-                dim=0,
-            ).unique()
-            global_tgt = data["target"].node_id[subgraph_tgt]
-
-        subgraph_src = subgraph_src.cpu().numpy()
-        global_src = global_src.cpu().numpy()
-        subgraph_tgt = subgraph_tgt.cpu().numpy()
-        global_tgt = global_tgt.cpu().numpy()
-
-        pos_edges = pd.MultiIndex.from_arrays(self.edges)
-
-        # 3 chances to sample negative edges
-        rng = np.random.default_rng(SEED)
-        for _ in range(3):
-            rnd_srcs = rng.choice(global_src, size=(num_pos * self.ratio * 2))
-            rnd_tgts = rng.choice(global_tgt, size=(num_pos * self.ratio * 2))
-
-            rnd_pairs = np.stack((rnd_srcs, rnd_tgts))
-            rnd_pairs = np.unique(rnd_pairs, axis=1)
-            rnd_pairs = pd.MultiIndex.from_arrays(rnd_pairs)
-            inter = rnd_pairs.intersection(pos_edges, sort=False)
-            neg_pairs = rnd_pairs.difference(inter, sort=False)
-
-            if len([*neg_pairs]) < (num_pos * self.ratio):
-                continue
-            neg_pairs = rng.choice([*neg_pairs], num_pos * self.ratio, replace=False).T
-            break
-
-        else:
-            raise RuntimeError("Could not successfully sample negatives.")
-
-        # build dictionaries to map global edge indices to local (subgraph) indices
-        source_map = dict(zip(pd.Series(global_src), pd.Series(subgraph_src)))
-        target_map = dict(zip(pd.Series(global_tgt), pd.Series(subgraph_tgt)))
-
-        neg_edges_srcs = pd.Series(neg_pairs[0]).map(source_map).values
-        neg_edges_tgts = pd.Series(neg_pairs[1]).map(target_map).values
-
-        new_labels = torch.cat(
-            (
-                data["binds"].edge_label.cpu(),
-                torch.Tensor(np.zeros(num_pos * self.ratio)),
-            )
-        ).to(DEVICE)
-        new_edges = (
-            torch.cat(
-                (
-                    data["binds"].edge_label_index.cpu(),
-                    torch.Tensor(np.array([neg_edges_srcs, neg_edges_tgts])),
-                ),
-                axis=1,
-            )
-            .type(torch.int32)
-            .to(DEVICE)
-        )
-
-        data["binds"].edge_label = new_labels
-        data["binds"].edge_label_index = new_edges
+        # update data object
+        data["binds"].edge_label = new_label
+        data["binds"].edge_label_index = new_edges.contiguous()
 
         return data

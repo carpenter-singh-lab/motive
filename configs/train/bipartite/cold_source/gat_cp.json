@@ -1,0 +1,1 @@
+{"hidden_channels": 256, "learning_rate": 0.011007955732797, "weight_decay": 0.0001224823195311, "model_name": "gat", "data_split": "source", "initialization": "cp"}

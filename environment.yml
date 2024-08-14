@@ -1,4 +1,4 @@
-name: graphdti
+name: motive
 channels:
   - bioconda
   - pytorch
@@ -20,3 +20,4 @@ dependencies:
   - pip=24.0
   - pip:
     - torcheval
+    - copairs==0.4.1

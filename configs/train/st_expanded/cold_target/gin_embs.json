@@ -1,0 +1,1 @@
+{"hidden_channels": 64, "learning_rate": 0.0035312119962249, "weight_decay": 0.0553674822449029, "model_name": "gin", "data_split": "target", "initialization": "embs"}

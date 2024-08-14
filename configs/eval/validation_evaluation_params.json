@@ -1,5 +1,0 @@
-{
-    "metrics" :["AUC", "F1"],
-    "Hits_K": 50,
-    "Precision_K": 100
-}

@@ -244,29 +244,24 @@ def load_graph_helper(leave_out: str, tgt_type: str, graph_type: str):
 
 
 def get_loader(data: HeteroData, edges, leave_out, type: str) -> LinkNeighborLoader:
-    # edges = list(torch.Tensor(edges).to(torch.int32))
     edge_label_index = data["source", "binds", "target"].edge_label_index
     edge_label = data["source", "binds", "target"].edge_label
 
     if type == "train":
-        bsz = 128
+        bsz = 512
         shuffle = True
+        ratio = 1
     else:
-        bsz = 3 * 128
+        bsz = 8192
         shuffle = False
-
-    if type == "test":
-        neg_sampling_ratio = 10
-        transform = SampleNegatives(edges, leave_out, neg_sampling_ratio)
-    else:
-        transform = SampleNegatives(edges, leave_out)
+        ratio = 10
 
     data_loader = LinkNeighborLoader(
         data=data,
-        num_neighbors=[-1, -1],
+        num_neighbors={key: [-1] * 4 for key in data.edge_types},
         edge_label_index=(("source", "binds", "target"), edge_label_index),
         edge_label=edge_label,
-        transform=transform,
+        transform=SampleNegatives(edges, leave_out, ratio),
         subgraph_type="bidirectional",
         batch_size=bsz,
         shuffle=shuffle,

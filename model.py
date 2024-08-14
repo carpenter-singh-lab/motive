@@ -2,7 +2,11 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import SAGEConv, to_hetero
+from torch_geometric.nn import MLP as tMLP
+from torch_geometric.nn import GATv2Conv, GINConv, SAGEConv, to_hetero
+
+from motive import get_counts
+from utils.utils import PathLocator
 
 
 class GNN(torch.nn.Module):
@@ -11,6 +15,50 @@ class GNN(torch.nn.Module):
 
         self.conv1 = SAGEConv(hidden_channels, hidden_channels, normalize=True)
         self.conv2 = SAGEConv(hidden_channels, hidden_channels, normalize=True)
+
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        # Define a 2-layer GNN computation graph.
+        h1 = F.leaky_relu(self.conv1(x, edge_index))
+        h2 = self.conv2(h1, edge_index)
+        h3 = h1 + h2
+        return h3
+
+
+class GIN(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super().__init__()
+
+        self.mlp1 = tMLP([hidden_channels, hidden_channels, hidden_channels])
+        self.mlp2 = tMLP([hidden_channels, hidden_channels, hidden_channels])
+        self.conv1 = GINConv(self.mlp1)
+        self.conv2 = GINConv(self.mlp2)
+
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        # Define a 2-layer GNN computation graph.
+        h1 = F.leaky_relu(self.conv1(x, edge_index))
+        h2 = self.conv2(h1, edge_index)
+        h3 = h1 + h2
+        return h3
+
+
+class GAT(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super().__init__()
+
+        self.conv1 = GATv2Conv(
+            hidden_channels,
+            hidden_channels // 2,
+            heads=2,
+            add_self_loops=False,
+            dropout=0.3,
+        )
+        self.conv2 = GATv2Conv(
+            hidden_channels,
+            hidden_channels // 2,
+            heads=2,
+            add_self_loops=False,
+            dropout=0.3,
+        )
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
         # Define a 2-layer GNN computation graph.
@@ -35,7 +83,9 @@ class Classifier(torch.nn.Module):
 
 
 class GraphSAGE_Embs(torch.nn.Module):
-    def __init__(self, hidden_channels, num_source_nodes, num_target_nodes, data):
+    def __init__(
+        self, hidden_channels, num_source_nodes, num_target_nodes, data, GNNClass
+    ):
         super().__init__()
 
         # embedding matrices for sources and targets:
@@ -43,7 +93,7 @@ class GraphSAGE_Embs(torch.nn.Module):
         self.target_emb = torch.nn.Embedding(num_target_nodes, hidden_channels)
 
         # Instantiate homogeneous GNN:
-        self.gnn = GNN(hidden_channels)
+        self.gnn = GNNClass(hidden_channels)
 
         # Convert GNN model into a heterogeneous variant:
         metadata = data.metadata()
@@ -73,8 +123,12 @@ class GraphSAGE_Embs(torch.nn.Module):
 # Child of our GNN model that initializes embedding weights with
 # cp features but freezes embeddings throughout training
 class GraphSAGE_CP(GraphSAGE_Embs):
-    def __init__(self, hidden_channels, num_source_nodes, num_target_nodes, data):
-        super().__init__(hidden_channels, num_source_nodes, num_target_nodes, data)
+    def __init__(
+        self, hidden_channels, num_source_nodes, num_target_nodes, data, GNNClass
+    ):
+        super().__init__(
+            hidden_channels, num_source_nodes, num_target_nodes, data, GNNClass
+        )
         src_weights = data["source"].x
         tgt_weights = data["target"].x
         source_size = data["source"].x.shape[1]
@@ -129,3 +183,58 @@ class Bilinear(torch.nn.Module):
         x_target = data["target"].x[target_ix]
         logits = self.bilinear(x_source, x_target)
         return torch.squeeze(logits)
+
+
+class Cosine(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cos = torch.nn.CosineSimilarity(dim=1, eps=1e-08)
+
+    def forward(self, data: HeteroData) -> Tensor:
+        source_ix = data["binds"]["edge_label_index"][0]
+        target_ix = data["binds"]["edge_label_index"][1]
+        x_source = data["source"].x[source_ix]
+        x_target = data["target"].x[target_ix]
+        logits = self.cos(x_source, x_target)
+        return logits
+
+
+def create_model(locator: PathLocator, data):
+    model_name = locator.config["model_name"]
+    num_sources, num_targets, num_features = get_counts(data)
+
+    if model_name in ("gnn", "gat", "gin"):
+        GNNClass = {"gnn": GNN, "gat": GAT, "gin": GIN}.get(model_name)
+        initialization = locator.config["initialization"]
+        if initialization == "cp":
+            model = GraphSAGE_CP(
+                int(locator.config["hidden_channels"]),
+                num_sources,
+                num_targets,
+                data,
+                GNNClass,
+            )
+        elif initialization == "embs":
+            model = GraphSAGE_Embs(
+                int(locator.config["hidden_channels"]),
+                num_sources,
+                num_targets,
+                data,
+                GNNClass,
+            )
+    elif model_name == "mlp":
+        model = MLP(
+            num_features["source"],
+            num_features["target"],
+            hidden_size=int(locator.config["hidden_channels"]),
+        )
+    elif model_name == "bilinear":
+        model = Bilinear(
+            num_features["source"],
+            num_features["target"],
+        )
+    elif model_name == "cosine":
+        model = Cosine()
+    else:
+        raise ValueError(f"Invalid model_name: {model_name}")
+    return model
