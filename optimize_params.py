@@ -30,7 +30,7 @@ def generate_parameters(num_opts: int):
         config_search, columns=["hidden_channels", "learning_rate", "weight_decay"]
     )
 
-    config_search_df.to_csv("inputs/optimize_configs.csv", index=False)
+    config_search_df.to_csv("configs/optimize/optimize_configs.csv", index=False)
     return config_search_df
 
 
@@ -131,7 +131,7 @@ def main():
 
     # or load previously generated parameters
     else:
-        configs = pd.read_csv("inputs/optimize_configs.csv")
+        configs = pd.read_csv("configs/optimize/optimize_configs.csv")
 
     # save results in df
     results = []
@@ -143,7 +143,7 @@ def main():
         curr_config["model_name"] = args.model
         curr_config["data_split"] = args.data_split
 
-        if args.model == "GNN":
+        if args.model == "gnn":
             curr_config["initialization"] = args.initialization
 
         with TemporaryDirectory() as tmpdir:
@@ -160,7 +160,7 @@ def main():
             args.graph_type,
         )
 
-        e = Evaluator("inputs/validation_evaluation_params.json")
+        e = Evaluator("configs/eval/validation_evaluation_params.json")
         val_metrics = e.evaluate(logits, ground_truth)
         results.append({**curr_config, **val_metrics})
 
