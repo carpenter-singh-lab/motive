@@ -24,11 +24,13 @@ class PathLocator:
             model_name = self.config["model_name"]
 
         root_dir = Path(f"{output_path}/{self.hashid}")
-        root_dir.mkdir(parents=True, exist_ok=True)
+        if not root_dir.exists():
+            root_dir.mkdir(parents=True)
 
         self.config_path = root_dir / "config.json"
-        with self.config_path.open("w", encoding="utf8") as f_out:
-            json.dump(self.config, f_out)
+        if not self.config_path.exists():
+            with self.config_path.open("w", encoding="utf8") as f_out:
+                json.dump(self.config, f_out)
 
         self.model_path = root_dir / f"{model_name}.pth"
         self.summary_path = root_dir / model_name

@@ -1,5 +1,12 @@
 {
-    "metrics" :["AUC", "Hits@K", "Precision@K", "F1"],
+    "metrics": [
+        "AUC",
+        "Hits@K",
+        "Precision@K",
+        "F1",
+        "BCELoss",
+        "mAP"
+    ],
     "Hits_K": 500,
     "Precision_K": 500
 }

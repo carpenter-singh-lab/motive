@@ -1,32 +1,63 @@
-import torch
+import json
+import warnings
+from bisect import bisect_left
+
 import numpy as np
 import pandas as pd
-import json
-from sklearn.metrics import accuracy_score, roc_auc_score, f1_score
-from torcheval.metrics.functional.ranking import retrieval_precision
+import torch
+from copairs import compute
+from copairs.map.average_precision import build_rank_lists, p_values
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from torch.nn import functional as F
 from torcheval.metrics.functional import binary_f1_score
+from torcheval.metrics.functional.ranking import retrieval_precision
+
+
+def compute_map(df):
+    """
+    input: dframe with "source", "target", "y_true", "score" columns
+    output: ap_scores
+    """
+    src_ix = df["source"].unique()
+    tgt_ix = df["target"].unique()
+    num_src, num_tgt = len(src_ix), len(tgt_ix)
+    src_mapper = dict(zip(src_ix, range(num_src)))
+    tgt_mapper = dict(zip(tgt_ix, range(num_src, num_src + num_tgt)))
+    df["src_copairs_id"] = df["source"].map(src_mapper)
+    df["tgt_copairs_id"] = df["target"].map(tgt_mapper)
+    pos_pairs = df.query("y_true==1")[["src_copairs_id", "tgt_copairs_id"]].values
+    neg_pairs = df.query("y_true==0")[["src_copairs_id", "tgt_copairs_id"]].values
+    pos_sims = df.query("y_true==1")["score"].values
+    neg_sims = df.query("y_true==0")["score"].values
+    paired_ix, rel_k_list, counts = build_rank_lists(
+        pos_pairs, neg_pairs, pos_sims, neg_sims
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', r'invalid value encountered in divide')
+        ap_scores, null_confs = compute.ap_contiguous(rel_k_list, counts)
+    ap_scores = pd.DataFrame(
+        {
+            "node_id": np.concatenate([src_ix, tgt_ix]),
+            "node_type": ["source"] * num_src + ["target"] * num_tgt,
+            "average_precision": ap_scores,
+            "n_pos_pairs": null_confs[:, 0],
+            "n_total_pairs": null_confs[:, 1],
+        }
+    )
+    ap_scores["p_value"] = p_values(ap_scores, 10000, 0)
+    ap_scores["below_p_value"] = ap_scores["p_value"] < 0.05
+    return ap_scores
 
 
 def get_best_th(logits, y_true):
-    if torch.is_tensor(logits) or torch.is_tensor(y_true):
-        logit_values = torch.unique(logits)
-        ths = torch.rand(50, device=logits.device.type)
-        ths = ths * (logit_values[-1] - logit_values[0]) + logit_values[0]
-        f1s = []
-        for th in ths:
-            f1s.append(binary_f1_score(logits, y_true, threshold=th))
-        ind = torch.argsort(torch.FloatTensor(f1s))
-        best_th = ths[ind][-1]
-
-    else:
-        logit_values = np.unique(logits)
-        values = {
-            th: f1_score(y_true, logits > th)
-            for th in np.random.uniform(logit_values[0], logit_values[-1], size=50)
-        }
-        best_th = pd.Series(values).sort_values().index[-1]
-
-    return best_th
+    return 0
+    # TODO: Check binary f1 is unimodal so that binary search fits
+    ths = torch.unique(logits).cpu().numpy()
+    best_f1 = 1
+    ix = bisect_left(
+        ths, -best_f1, key=lambda th: -binary_f1_score(logits, y_true, threshold=th)
+    )
+    return ths[ix]
 
 
 class Evaluator:
@@ -35,10 +66,10 @@ class Evaluator:
             self.config = json.load(freader)
         self.scores = {}
 
-    def evaluate(self, logits, y_true):
+    def evaluate(self, logits, y_true, th, edges):
         for metric in self.config["metrics"]:
             if metric == "ACC":
-                score = self._eval_ACC(logits, y_true)
+                score = self._eval_ACC(logits, y_true, th)
 
             elif metric == "AUC":
                 score = self._eval_AUC(logits, y_true)
@@ -52,22 +83,28 @@ class Evaluator:
                 score = self._eval_precision_at_K(logits, y_true)
 
             elif metric == "F1":
-                score = self._eval_F1(logits, y_true)
+                score = self._eval_F1(logits, y_true, th)
 
             elif metric == "MRR":
                 score = self._eval_MRR(logits, y_true)
 
-            self.scores[metric] = score
+            elif metric == "BCELoss":
+                score = self._eval_loss(logits, y_true)
+            elif metric == "mAP":
+                score = self._eval_mAP(logits, y_true, edges)
+            if type(score) is dict:
+                self.scores.update(score)
+            else:
+                self.scores[metric] = float(score)
 
         return self.scores
 
-    def _eval_ACC(self, logits, y_true):
+    def _eval_ACC(self, logits, y_true, th):
         if torch.is_tensor(logits) or torch.is_tensor(y_true):
             logits = logits.cpu().numpy()
             y_true = y_true.cpu().numpy()
 
-        best_th = get_best_th(logits, y_true)
-        y_pred = logits > best_th
+        y_pred = logits > th
         return accuracy_score(y_true, y_pred)
 
     def _eval_AUC(self, logits, y_true):
@@ -75,7 +112,7 @@ class Evaluator:
             logits = logits.cpu().numpy()
             y_true = y_true.cpu().numpy()
 
-        y_pred = 1 / (1 + np.exp(-logits))
+        y_pred = 1 / (1 + np.exp(-np.clip(logits, 1e-5, 1e5)))
         return roc_auc_score(y_true, y_pred)
 
     def _eval_hits_at_K(self, logits, y_true):
@@ -113,18 +150,11 @@ class Evaluator:
             precision = np.sum(ranked_logits) / k
         return precision
 
-    def _eval_F1(self, logits, y_true):
-        best_th = get_best_th(logits, y_true)
+    def _eval_F1(self, logits, y_true, th):
         if torch.is_tensor(logits) or torch.is_tensor(y_true):
-            best_th = torch.sigmoid(best_th).item()
-            y_pred = torch.sigmoid(logits)
-            f1 = binary_f1_score(y_pred, y_true, threshold=best_th).item()
+            f1 = binary_f1_score(logits, y_true, threshold=th).item()
         else:
-            best_th = 1 / (1 + np.exp(-best_th))[0]
-            scores = 1 / (1 + np.exp(-logits))
-            y_pred = scores > best_th
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-
+            f1 = f1_score(y_true, logits > th, zero_division=0)
         return f1
 
     def _eval_MRR(self, logits, y_true):
@@ -149,6 +179,32 @@ class Evaluator:
             mrr = np.mean(mrr_list)
 
         return mrr
+
+    @torch.inference_mode
+    def _eval_loss(self, logits, y_true):
+        return F.binary_cross_entropy_with_logits(logits, y_true.to(torch.float32))
+
+    def _eval_mAP(self, logits, y_true, edges):
+        source, target = edges.cpu().numpy()
+        dframe = pd.DataFrame(
+            {
+                "source": source,
+                "target": target,
+                "y_true": y_true.cpu().numpy(),
+                "score": logits.cpu().numpy(),
+            }
+        )
+        split = "source"
+        ap_scores = compute_map(dframe).query(f"node_type=='{split}'")
+        lt_p = ap_scores.below_p_value.sum()
+        lt_p_ratio = lt_p / len(ap_scores)
+        mean_average_precision = ap_scores["average_precision"].mean()
+        scores = {
+            f"{split}_lt_p": lt_p,
+            f"{split}_lt_p_ratio": lt_p_ratio,
+            f"{split}_mAP": mean_average_precision,
+        }
+        return scores
 
 
 def save_metrics(scores: dict, output_path: str):
