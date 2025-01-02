@@ -2,7 +2,7 @@
 
 Source code and documentation for ["MOTI$`\mathcal{V}\mathcal{E}`$: A
 Drug-Target Interaction Graph For Inductive Link
-Prediction"](https://arxiv.org/abs/2406.08649v1).
+Prediction"](https://arxiv.org/abs/2406.08649).
 
 See the [Wiki](https://github.com/carpenter-singh-lab/motive/wiki) for full documentation, operational details and other information.
 
