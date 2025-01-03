@@ -28,22 +28,22 @@ We provide two options for programmatic access. Both will populate the working d
 The following command will download `inputs` and `data` folders:
 
 ```bash
-aws s3 sync --no-sign-request s3://cellpainting-gallery/cpg0034-arevalo-su-motive/broad/workspace/publication_data/2024_MOTIVE . 
+aws s3 sync --no-sign-request s3://cellpainting-gallery/cpg0034-arevalo-su-motive/broad/workspace/publication_data/2024_MOTIVE .
 ```
-### Run the snakemake pipeline 
-Alternatively, you can also run the [Snakemake](https://snakemake.readthedocs.io/en/v7.32.3/) pipeline included in this repo which downloads the necessary `inputs` and generates the `data` files. 
+### Run the snakemake pipeline
+Alternatively, you can also run the [Snakemake](https://snakemake.readthedocs.io/en/v7.32.3/) pipeline included in this repo which downloads the necessary `inputs` and generates the `data` files.
 
 ```bash
 snakemake -c1
 ```
-With `1` being the number of cores you want to use. 
+With `1` being the number of cores you want to use.
 
 ## Train
 Run the following command to train a model on the MOTI$`\mathcal{VE}`$ dataset. The config file should indicate the graph type (optimized configs are only provided for the `bipartite` and `st_expanded` graph structures), gene type, data split, and model. An example is provided below.
 
 ```python run_training.py configs/train/st_expanded/cold_source/gnn_cp.json outputs/```
 
-The training will produce a `test_results.parquet` file in the `outputs/` folder with the predicted scores and percentiles for each source target pair in the test set. 
+The training will produce a `test_results.parquet` file in the `outputs/` folder with the predicted scores and percentiles for each source target pair in the test set.
 
 |              |    score | y_pred   |   y_true |   percentile |
 |:-------------|---------:|:---------|---------:|-------------:|
